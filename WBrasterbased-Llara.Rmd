@@ -1,0 +1,243 @@
+---
+title: "Water balance model (rasterbased)"
+author: "Niranjan Wimalathunge"
+date: "7/2/2021"
+output:
+  html_document: default
+  pdf_document: default
+description: "time-series of soil water rasters"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(warning = FALSE)
+```
+
+## Introduction
+The USYD Soil Water Balance Model (WBM) is a process-based model designed to address soil water dynamics across various depth supports and scalable farmscapes. This multi-layer, knowledge-based model enhances the representation of vertical soil moisture variation. Functioning as an unsaturated model, the WBM allows water to freely and continuously infiltrate through layers in accordance with soil properties determined by the Soil Landscape Grid of Australia (SLGA). The model's layer thickness is defined by SLGA depth intervals. To calculate the saturated volumetric moisture content (θs), corresponding clay, sand, and bulk density values are employed. This calculation is carried out using a pedotransfer function (PTF) developed by Padarian et al. (2014).
+
+The soil is assumed to be uniform within each horizontal layer, with water flowing vertically through these layers. As a result, infiltration occurs continuously across all layers, and any excess soil water beyond the 60–100 cm layer is considered deep drainage, lost to the system given the modeling depth of 1m (root zone). Additionally, runoff is assumed to occur only when Layer 0–5 cm and Layer 5–15 cm become saturated.
+
+The model runs daily on each SLGA raster cell, incorporating the corresponding values for rainfall and evapotranspiration (ET). ET is extracted in layers: first from layer one, and if a deficit persists, it is then drawn from layer 2. This process continues sequentially through subsequent layers. This approach mirrors the general behavior of water extraction by the root systems of crops.
+
+### Getting Started
+```{r,warning=FALSE,message=FALSE}
+# load required libraries
+library(raster)
+library(RCurl)
+library(rgdal)
+library(sp)
+library(sf)
+library(viridis)
+library(mapview)
+```
+
+## An example
+### Area of interest (Llara)
+```{r,warning=FALSE,message=FALSE}
+#Llara farm extent
+Llara <- readOGR('X:/PRJ-SoilWaterNow/data/Aus/Farms&sites/Llara/Llarashapefile/Farm_boundary_new.shp')
+Llara<-spTransform(Llara,CRS("+proj=longlat +datum=WGS84"))
+names(Llara)<-"Llara"
+mapview(Llara, legend=F)
+```
+
+### Get data
+Use the [link](https://github.com/niranman/Water-Balance-Raster-Based) to download the datasets and change the file paths accordingly
+
+### Model Inputs 
+The model inputs derive from 8-day ET (MODIS 500 m), daily rainfall (SILO 5 km ) and soil (SLGA 90 m), which can be freely downloadable. This tutorial shows as an example to show how to estimate soil water for an area of interest using the model.
+
+ET: 8-day ET convert to daily assuming ET is uniform and resample to 90 m to match with the SLGA soil data
+rain: resample to 90 m to match with the SLGA soil data
+theta: Clay, Silt, Sand, and Bulk density layers
+
+Model run:from 01-01-2016 to 31-12-2021 
+```{r}
+ET <- brick("C:/Users/nman2690/OneDrive - The University of Sydney (Staff)/Llara/LlaraWB/LlaraET01-21_90m.tif")[[5479:7670]]
+rain <- brick("C:/Users/nman2690/OneDrive - The University of Sydney (Staff)/Llara/LlaraWB/LlaraRain01-21_90m.tif")[[5479:7670]] 
+theta <- brick("C:/Users/nman2690/OneDrive - The University of Sydney (Staff)/Llara/LlaraWB/LlaraSoil.tif")
+```
+
+### Bucket size
+The field capacity (drained upper limit (DUL))
+```{r}
+names(theta)[1:20]<-c( "BDW_005","BDW_015","BDW_030","BDW_060","BDW_100",
+                       "CLY_005","CLY_015","CLY_030","CLY_060","CLY_100", 
+                       "SLT_005","SLT_015","SLT_030","SLT_060","SLT_100",
+                       "SND_005","SND_015","SND_030","SND_060","SND_100")
+fc_005 = 0.4795 - 3.873 * 10^-5 * theta$SND_005 ^2 - 6.701 * 10^-7 * theta$CLY_005 ^2 * theta$SND_005
+fc_015 = 0.4795 - 3.873 * 10^-5 * theta$SND_015 ^2 - 6.701 * 10^-7 * theta$CLY_015 ^2 * theta$SND_015
+fc_030 = 0.4795 - 3.873 * 10^-5 * theta$SND_030 ^2 - 6.701 * 10^-7 * theta$CLY_030 ^2 * theta$SND_030
+fc_060 = 0.4795 - 3.873 * 10^-5 * theta$SND_060 ^2 - 6.701 * 10^-7 * theta$CLY_060 ^2 * theta$SND_060
+fc_100 = 0.4795 - 3.873 * 10^-5 * theta$SND_100 ^2 - 6.701 * 10^-7 * theta$CLY_100 ^2 * theta$SND_100
+```
+
+Permanent wilting point (crop lower limit (CLL))
+```{r}
+pwp_005 = -0.1554 - 0.7221 * tanh(0.5 * (-0.9705 - 0.8529 * theta$BDW_005 - 0.00827 *theta$CLY_005 + 0.01994 * theta$SND_005))  + 0.1325 * tanh(0.5 * (3.71 - 3.19 * theta$BDW_005+ 0.01205 * theta$CLY_005 + 0.01617 * theta$SND_005)) + 0.1720 * tanh(0.5 * (-3.94 - 0.5067 * theta$BDW_005 + 0.02158 * theta$CLY_005 + 0.04978 * theta$SND_005)) 
+
+pwp_015 = -0.1554 - 0.7221 * tanh(0.5 * (-0.9705 - 0.8529 * theta$BDW_015 - 0.00827 *theta$CLY_015 + 0.01994 * theta$SND_015))  + 0.1325 * tanh(0.5 * (3.71 - 3.19 * theta$BDW_015+ 0.01205 * theta$CLY_015 + 0.01617 * theta$SND_015)) + 0.1720 * tanh(0.5 * (-3.94 - 0.5067 * theta$BDW_015 + 0.02158 * theta$CLY_015 + 0.04978 * theta$SND_015)) 
+
+pwp_030 = -0.1554 - 0.7221 * tanh(0.5 * (-0.9705 - 0.8529 * theta$BDW_030 - 0.00827 *theta$CLY_030 + 0.01994 * theta$SND_030))  + 0.1325 * tanh(0.5 * (3.71 - 3.19 * theta$BDW_030+ 0.01205 * theta$CLY_030 + 0.01617 * theta$SND_030)) + 0.1720 * tanh(0.5 * (-3.94 - 0.5067 * theta$BDW_030 + 0.02158 * theta$CLY_030 + 0.04978 * theta$SND_030)) 
+
+pwp_060 = -0.1554 - 0.7221 * tanh(0.5 * (-0.9705 - 0.8529 * theta$BDW_060 - 0.00827 *theta$CLY_060 + 0.01994 * theta$SND_060))  + 0.1325 * tanh(0.5 * (3.71 - 3.19 * theta$BDW_060+ 0.01205 * theta$CLY_060 + 0.01617 * theta$SND_060)) + 0.1720 * tanh(0.5 * (-3.94 - 0.5067 * theta$BDW_060 + 0.02158 * theta$CLY_060 + 0.04978 * theta$SND_060)) 
+
+pwp_100 = -0.1554 - 0.7221 * tanh(0.5 * (-0.9705 - 0.8529 * theta$BDW_100 - 0.00827 *theta$CLY_100 + 0.01994 * theta$SND_100))  + 0.1325 * tanh(0.5 * (3.71 - 3.19 * theta$BDW_100+ 0.01205 * theta$CLY_100 + 0.01617 * theta$SND_100)) + 0.1720 * tanh(0.5 * (-3.94 - 0.5067 * theta$BDW_100 + 0.02158 * theta$CLY_100 + 0.04978 * theta$SND_100)) 
+
+pwp_bucketSize <-stack(pwp_005*50,pwp_015*100,pwp_030*150,pwp_060*300,pwp_100*400)
+names(pwp_bucketSize)[1:5]<-c("pwp_005","pwp_015","pwp_030","pwp_060","pwp_100")
+```
+The minimum soil water in surface layers (0-5, 5-15 cm) determine by the residual moisture content 
+
+```{r}
+
+# Residual Theta
+resid_005<- (0.3697 *tanh (-0.0167 * theta$CLY_005 - 0.0259 * theta$SND_005 + 0.5587 * theta$BDW_005 + 1.86) - 
+               0.2543 *tanh (-0.0074 * theta$CLY_005 - 0.0061 * theta$SND_005 + 0.9869 * theta$BDW_005 - 1.47) - 
+               0.2099* tanh (-0.0653 * theta$CLY_005 - 0.0063 * theta$SND_005 - 5.3000 * theta$BDW_005 + 9.40) - 0.2032)^2
+
+resid_015<- (0.3697 *tanh (-0.0167 * theta$CLY_015 - 0.0259 * theta$SND_015 + 0.5587 * theta$BDW_015 + 1.86) - 
+               0.2543 *tanh (-0.0074 * theta$CLY_015 - 0.0061 * theta$SND_015 + 0.9869 * theta$BDW_015 - 1.47) - 
+               0.2099* tanh (-0.0653 * theta$CLY_015 - 0.0063 * theta$SND_015 - 5.3000 * theta$BDW_015 + 9.40) - 0.2032)^2
+resid_bucket<-stack(resid_005*50,resid_015*100)
+
+# Bucket size for each soil layers
+bucketSize <-stack((fc_005-resid_005)*50,(fc_015-resid_015)*100,(fc_030-pwp_030)*150,
+                   (fc_060-pwp_060)*300,(fc_100-pwp_100)*400)
+
+# water not access to plants
+ResRootzone<-resid_005*50+resid_015*100+pwp_030*150+pwp_060*300+pwp_100*400
+ResTopsoil<-resid_005*50+resid_015*100+pwp_030*150
+```
+
+### The water balance
+
+```{r}
+# 1- current day ; 2-previous day 
+# For example, SMA1(0-5 cm) means  today's soil moisture for 0-5 cm layer whereas SMA2 is previous day soil moisture for 0-5 cm layer
+SM=raster(ET);SM=setValues(SM,0)
+SMA1=SM;SMA2=SM;SMA3=SM
+SMB1=SM;SMB2=SM;SMB3=SM
+SMC1=SM;SMC2=SM;SMC3=SM
+SMD1=SM;SMD2=SM;SMD3=SM
+SME1=SM;SME2=SM;SME3=SM
+runoff=SM; DeepD=SM
+SM100total=stack();SM30total=stack()
+SM30paw=stack();SM100paw=stack()
+ETd=SM # deficit ET
+
+for(a in 1:dim(ET)[3]){
+  
+  #layer 0-5 cm 
+  SMA2=SMA1*.8
+  SMA1=SMA1*.2
+  
+  SMA1= SMA1+rain[[a]]-(ET[[a]])*0.125
+  
+  ETd<- overlay(SMA1,ETd, fun = function(x,y) {i <- x > 0 ;y[i] <- 0;return(y)})
+  ETd<- overlay(SMA1,ETd, fun = Vectorize(function(x,y) {i <- x < 0 ;y[i] <- -x;return(y)}))
+  SMA1<-calc(SMA1, fun=function(x){ x[x < 0] <- 0; return(x)} )
+  
+  SMB1<- overlay(SMA1,SMB1,bucketSize[[1]], fun = Vectorize(function(x, y, z) {i <- x > z ;y[i] <- y[i] + (x[i]-z[i]);return(y)})) 
+  SMA1<- overlay(SMA1,SMB1,bucketSize[[1]], fun = Vectorize(function(x, y, z) {i <- x > z ;x[i] <- z[i];return(x)}))
+  
+  #layer 5-15 cm
+  SMB2=SMB1*.05
+  SMB1=SMB1*.95
+  
+  SMB1 = SMB1+SMA2-ETd
+  
+  ETd<- overlay(SMB1,ETd, fun = Vectorize(function(x,y) {i <- x > 0 ;y[i] <- 0;return(y)}))
+  ETd<- overlay(SMB1,ETd, fun = Vectorize(function(x,y) {i <- x < 0 ;y[i] <- -x;return(y)}))
+  SMB1<-calc(SMB1, fun=function(x){ x[x < 0] <- 0; return(x)})
+  
+  # if layer 1 and layer 2 full then runoff is the offset of the layer2
+  runoff<-overlay(SMA1,SMB1,bucketSize[[1]], bucketSize[[2]],runoff,fun=Vectorize(function(x,y,z,v,w){i<-x==z & y>v;w[i]<-y[i]-v[i];return(w)}))
+  SMB1<-overlay(SMB1,SMC1,bucketSize[[2]], fun=Vectorize(function(x,y,z){i<-x>z;x[i]<-z[i];return(x)}))
+  
+  # else
+  SMC1<-overlay(SMB1,SMC1,bucketSize[[2]], fun=Vectorize(function(x,y,z){i<-x>z;y[i]<-y[i]+(x[i]-z[i]);return(y)}))
+  SMB1<-overlay(SMB1,SMC1,bucketSize[[2]], fun=Vectorize(function(x,y,z){i<-x>z;x[i]<-z[i];return(x)}))
+  
+  
+  #layer 15-30 cm
+  SMC2=SMC1*.05
+  SMC1=SMC1*.95
+  
+  SMC1 = SMC1+SMB2-ETd
+  
+  ETd<- overlay(SMC1,ETd, fun = Vectorize(function(x,y) {i <- x > 0 ;y[i] <- 0;return(y)}))
+  ETd<- overlay(SMC1,ETd, fun = Vectorize(function(x,y) {i <- x < 0 ;y[i] <- -x;return(y)}))
+  SMC1<-calc(SMC1, fun=function(x){ x[x < 0] <- 0; return(x)})
+  
+  SMD1<-overlay(SMC1,SMD1,bucketSize[[3]],fun=Vectorize(function(x,y,z){i<-x>z;y[i]<-y[i]+(x[i]-z[i]);return(y)}))
+  SMC1<-overlay(SMC1,SMD1,bucketSize[[3]],fun=Vectorize(function(x,y,z){i<-x>z;x[i]<-z[i];return(x)}))
+  
+  #layer 30-60 cm
+  SMD2=SMD1*.01
+  SMD1=SMD1*.99
+  
+  SMD1 = SMD1+ SMC2-ETd
+  
+  ETd<- overlay(SMD1,ETd, fun = Vectorize(function(x,y) {i <- x > 0 ;y[i] <- 0;return(y)}))
+  ETd<- overlay(SMD1,ETd, fun = Vectorize(function(x,y) {i <- x < 0 ;y[i] <- -x;return(y)}))
+  SMD1<-calc(SMD1, fun=function(x){ x[x < 0] <- 0; return(x)})
+  
+  SME1<-overlay(SMD1,SME1,bucketSize[[4]],fun=Vectorize(function(x,y,z){i<-x>z;y[i]<-y[i]+(x[i]-z[i]);return(y)}))
+  SMD1<-overlay(SMD1,SME1,bucketSize[[4]],fun=Vectorize(function(x,y,z){i<-x>z;x[i]<-z[i];return(x)}))
+  
+  #layer 60-100 cm
+  SME2=SME1*.01
+  SME1=SME1*.99
+  
+  SME1 = SME1+ SMD2-ETd
+  
+  ETd<- overlay(SME1,ETd, fun = Vectorize(function(x,y) {i <- x > 0 ;y[i] <- 0;return(y)}))
+  ETd<- overlay(SME1,ETd, fun = Vectorize(function(x,y) {i <- x < 0 ;y[i] <- -x;return(y)}))
+  SME1<-calc(SME1, fun=function(x){ x[x < 0] <- 0; return(x)})
+  
+  DeepD<-overlay(SME1,DeepD,bucketSize[[5]],fun=Vectorize(function(x,y,z){i<-x>z;y[i]<-y[i]+(x[i]-z[i]);return(y)}))
+  SME1<-overlay(SME1,DeepD,bucketSize[[5]],fun=Vectorize(function(x,y,z){i<-x>z;x[i]<-z[i];return(x)}))
+  
+  #select either Total water or Paw water and save
+  #SM30total=stack(SM30total,(SMA1+SMB1+SMC1+ResTopsoil))# Total water
+  #SM100total=stack(SM100total,(SMA1+SMB1+SMC1+SMD1+SME1+ResRootzone))# Total water
+  
+  SM30paw=stack(SM30paw,(SMA1+SMB1+SMC1))# Plant available water
+  SM100paw=stack(SM100paw,(SMA1+SMB1+SMC1+SMD1+SME1))# plant available water
+  
+  runoff=setValues(runoff, 0)
+  DeepD=setValues(DeepD, 0)
+  ETd=setValues(ETd,0)
+  a=a+1
+}
+```
+### Save rasters
+```{r}
+writeRaster(SM100paw, filename='X:/PRJ-SoilWaterNow/data/Aus/Farms&sites/Llara/SM100paw(2016-2021).tif', format="GTiff", overwrite=TRUE,options=c("INTERLEAVE=BAND","COMPRESS=LZW"))
+writeRaster(SM30paw, filename='X:/PRJ-SoilWaterNow/data/Aus/Farms&sites/Llara/SM100paw(2016-2021).tif', format="GTiff", overwrite=TRUE,options=c("INTERLEAVE=BAND","COMPRESS=LZW"))
+```
+
+### Plot soil water
+Important dates which you need soil water conditions
+For example, 1st April 2021: the start of the crops
+             1st July  2021: full-grown crop 
+
+Topsoil(0-30cm),Subsoil(30-100), and Rootzone (0-100 cm)
+
+```{r}
+names(SM30paw)<-paste("Topsoil", seq(from=as.Date('2016-01-01'), to=as.Date("2021-12-31"),by='days' ), sep = "_")
+Topsoil<-SM30paw[[grep("2021.04.01|2021.07.01",names(SM30paw))]]
+
+names(SM100paw)<-paste("Rootzone", seq(from=as.Date('2016-01-01'), to=as.Date("2021-12-31"),by='days' ), sep = "_")
+Rootzone<-SM100paw[[grep("2021.04.01|2021.07.01",names(SM100paw))]]
+
+Subsoil=SM100paw-SM30paw
+names(Subsoil)<-paste("Subsoil", seq(from=as.Date('2016-01-01'), to=as.Date("2021-12-31"),by='days' ), sep = "_")
+Subsoil<-Subsoil[[grep("2021.04.01|2021.07.01",names(Subsoil))]]
+
+boundary.layer <- list("sp.lines", Llara, col = "green")
+spplot(stack(Topsoil,Subsoil,Rootzone),sp.layout = boundary.layer,col.regions=viridis(100),main="Plant Available Water (mm)",scales = list(draw = TRUE))
+
+```
