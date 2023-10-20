@@ -10,4 +10,4 @@ soil data can be downloaded from https://www.longpaddock.qld.gov.au/silo/gridded
 
 use R code: ET&rain4WBmodel.r to create daily datasets from downloaded MODIS ET and SILO rainfall
 
-or else, the model can be tested with the given RDA datasets.
+or else, the model can be tested with the given RDS datasets.
